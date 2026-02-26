@@ -157,8 +157,30 @@ def read_file(uploaded_file):
     """Đọc file xlsx/xls/csv → list of rows"""
     name = uploaded_file.name.lower()
     if name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file, header=None, dtype=str)
+        # Auto-detect separator: thử ; trước rồi ,
+        raw = uploaded_file.read()
+        # Thử detect encoding
+        for enc in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+            try:
+                text = raw.decode(enc)
+                break
+            except:
+                continue
+        # Detect separator
+        first_line = text.split('\n')[0]
+        sep = ';' if first_line.count(';') > first_line.count(',') else ','
+        from io import StringIO
+        df = pd.read_csv(StringIO(text), header=None, dtype=str, sep=sep)
         return df.fillna('').values.tolist()
+    elif name.endswith('.xls'):
+        # Format cũ Excel 97-2003 → dùng xlrd
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=uploaded_file.read())
+        ws = wb.sheet_by_index(0)
+        rows = []
+        for i in range(ws.nrows):
+            rows.append([ws.cell_value(i, j) for j in range(ws.ncols)])
+        return rows
     else:
         wb = openpyxl.load_workbook(uploaded_file, data_only=True)
         ws = wb.active

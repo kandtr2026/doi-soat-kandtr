@@ -6,7 +6,7 @@ from io import BytesIO
 from datetime import datetime
 import re
 
-st.set_page_config(page_title="Bank File Merger", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="Bank File Merger v1.4 | 28/02 07:10", page_icon="🏦", layout="wide")
 
 # ── BANK PROFILES ──────────────────────────────────────────────
 def detect_bank(rows):
@@ -252,9 +252,11 @@ def process_files(files_by_group):
                 flat = ''.join([str(c or '') for c in row]).strip()
                 if not flat: continue
 
-                # Check có ngày hợp lệ không
-                date_val = row[0] if row else None
-                d = parse_date(date_val)
+                # Check có ngày hợp lệ không - tìm trong các col đầu
+                d = None
+                for _ci in range(min(5, len(row))):
+                    d = parse_date(row[_ci])
+                    if d: break
                 if not d: continue
 
                 total_input += 1
@@ -308,7 +310,7 @@ def process_files(files_by_group):
     return results
 
 # ── UI ─────────────────────────────────────────────────────────
-st.title("🏦 Bank File Merger")
+st.title("🏦 Bank File Merger v1.4 | 28/02 07:10")
 st.caption("Upload file sao kê ngân hàng → Tự nhận dạng → Merge + Dedup → Xuất file sạch")
 
 uploaded = st.file_uploader(

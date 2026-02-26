@@ -159,19 +159,37 @@ def read_file(uploaded_file):
     if name.endswith('.csv'):
         # Auto-detect separator: thử ; trước rồi ,
         raw = uploaded_file.read()
-        # Thử detect encoding
-        for enc in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+        # Detect encoding (handle BOM)
+        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
             try:
                 text = raw.decode(enc)
                 break
             except:
                 continue
-        # Detect separator
-        first_line = text.split('\n')[0]
-        sep = ';' if first_line.count(';') > first_line.count(',') else ','
-        from io import StringIO
-        df = pd.read_csv(StringIO(text), header=None, dtype=str, sep=sep)
-        return df.fillna('').values.tolist()
+        # Parse thủ công từng dòng để tránh lỗi pandas với file có số cột không đều
+        lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        rows = []
+        for line in lines:
+            if not line.strip():
+                rows.append([])
+                continue
+            # Detect separator từ dòng có nhiều field nhất
+            sep = ';' if line.count(';') > line.count(',') else ','
+            # Parse thủ công handle quoted fields
+            cols = []
+            cur = ''
+            in_q = False
+            for ch in line:
+                if ch == '"':
+                    in_q = not in_q
+                elif ch == sep and not in_q:
+                    cols.append(cur.strip())
+                    cur = ''
+                else:
+                    cur += ch
+            cols.append(cur.strip())
+            rows.append(cols)
+        return rows
     elif name.endswith('.xls'):
         # Format cũ Excel 97-2003 → dùng xlrd
         import xlrd

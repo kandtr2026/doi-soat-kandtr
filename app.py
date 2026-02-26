@@ -1,4 +1,5 @@
 import streamlit as st
+import zipfile
 import pandas as pd
 import openpyxl
 from openpyxl import Workbook
@@ -6,7 +7,7 @@ from io import BytesIO
 from datetime import datetime
 import re
 
-st.set_page_config(page_title="Bank File Merger v1.4 | 28/02 07:10", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="Bank File Merger v1.5 | 28/02 07:25", page_icon="🏦", layout="wide")
 
 # ── BANK PROFILES ──────────────────────────────────────────────
 def detect_bank(rows):
@@ -310,7 +311,7 @@ def process_files(files_by_group):
     return results
 
 # ── UI ─────────────────────────────────────────────────────────
-st.title("🏦 Bank File Merger v1.4 | 28/02 07:10")
+st.title("🏦 Bank File Merger v1.5 | 28/02 07:25")
 st.caption("Upload file sao kê ngân hàng → Tự nhận dạng → Merge + Dedup → Xuất file sạch")
 
 uploaded = st.file_uploader(
@@ -372,6 +373,26 @@ if uploaded:
 
         st.success(f"✅ Hoàn tất! {len(results)} file đã được tạo")
         st.divider()
+
+        # Nút Download All - zip tất cả file
+        ok_results = {k:v for k,v in results.items() if 'error' not in v}
+        if len(ok_results) > 1:
+            zip_buf = BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for k, r in ok_results.items():
+                    r['data'].seek(0)
+                    zf.writestr(r['filename'], r['data'].read())
+            zip_buf.seek(0)
+            st.download_button(
+                label=f"⬇️ Tải tất cả ({len(ok_results)} file) — ZIP",
+                data=zip_buf,
+                file_name="bank_merged_all.zip",
+                mime="application/zip",
+                type="primary",
+                use_container_width=True,
+                key="dl_all"
+            )
+            st.divider()
 
         for key, res in results.items():
             if 'error' in res:

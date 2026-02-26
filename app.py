@@ -17,7 +17,7 @@ def detect_bank(rows):
         return 'VCB'
     if 'so but toan' in flat.lower() and 'ngay giao dich' in flat.lower():
         return 'TCB'
-    if 'VIETINBANK' in flat.upper() or 'eFAST' in flat:
+    if 'VIETINBANK' in flat.upper() or 'efast' in flat.lower() or 'LỊCH SỬ GIAO DỊCH' in flat:
         return 'VTB'
     if 'MB BANK' in flat.upper() or 'MILITARY' in flat.upper():
         return 'MB'
@@ -57,7 +57,7 @@ def find_header_row(rows, bank_id):
         'ACB': ['ngày hiệu lực', 'số gd'],
         'VCB': ['debit', 'credit'],
         'TCB': ['so but toan', 'no/debit'],
-        'VTB': ['ngày hạch toán', 'nợ/ debit'],
+        'VTB': ['accounting date', 'debit'],
         'MB':  ['ngày giao dịch', 'số tiền'],
     }
     keywords = kws.get(bank_id, [])
@@ -86,10 +86,14 @@ def parse_date(val):
     """Parse date từ nhiều format"""
     if not val: return None
     s = str(val).strip().split('\n')[0]  # VCB merged cell
+    # Nếu là datetime object (openpyxl trả về datetime)
+    if hasattr(val, 'year'): return val
     patterns = [
-        r'^(\d{1,2})/(\d{1,2})/(\d{4})',      # dd/mm/yyyy
-        r'^(\d{4})-(\d{2})-(\d{2})',            # yyyy-mm-dd
-        r'^(\d{1,2})-(\d{1,2})-(\d{4})',        # dd-mm-yyyy
+        r'^(\d{1,2})/(\d{1,2})/(\d{4})',           # dd/mm/yyyy
+        r'^(\d{1,2})/(\d{1,2})/(\d{4})\s+\d{1,2}:\d{2}', # dd/mm/yyyy HH:MM
+        r'^(\d{4})-(\d{2})-(\d{2})',                 # yyyy-mm-dd
+        r'^(\d{1,2})-(\d{1,2})-(\d{4})',             # dd-mm-yyyy
+        r'^(\d{1,2})-(\d{1,2})-(\d{4})\s+\d{1,2}:\d{2}', # dd-mm-yyyy HH:MM:SS
     ]
     for p in patterns:
         m = re.match(p, s)

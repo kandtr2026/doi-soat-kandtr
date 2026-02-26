@@ -62,7 +62,8 @@ def find_header_row(rows, bank_id):
     }
     keywords = kws.get(bank_id, [])
     for i, row in enumerate(rows):
-        flat = ' '.join([str(c or '').lower() for c in row])
+        # Normalize: replace newlines + tabs → space trước khi so sánh
+        flat = ' '.join([str(c or '').replace('\n',' ').replace('\t',' ').lower() for c in row])
         if all(kw in flat for kw in keywords):
             return i
     return -1
@@ -71,6 +72,9 @@ def parse_amount(val):
     """Normalize số: xóa dấu . và , phân cách nghìn → số nguyên"""
     if val is None or str(val).strip() == '': return 0
     s = str(val).strip()
+    # Xóa chữ VND và ký tự không phải số ở cuối (VD: "21,991,508 VND")
+    s = re.sub(r'[A-Za-z\s]+$', '', s).strip()
+    if not s: return 0
     # Xóa tất cả dấu chấm và phẩy (VN dùng . hoặc , để phân cách nghìn)
     s = re.sub(r'[,\.]', '', s)
     try:

@@ -451,6 +451,153 @@ RAW_TO_ACCOUNT = {
     'Tech NAKA':     {'name': 'Raw_Tech_Naka',   'bank': 'TCB'},
 }
 
+def connect_gsheet(creds_json):
+    """Kết nối Google Sheets từ credentials JSON"""
+    try:
+        creds = Credentials.from_service_account_info(creds_json, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        return spreadsheet, None
+    except Exception as e:
+        return None, str(e)
+
+def get_sheet_names(spreadsheet):
+    """Lấy tất cả sheet names"""
+    return [ws.title for ws in spreadsheet.worksheets()]
+
+def get_project_sheets(spreadsheet):
+    """Lấy các sheet dự án (loại trừ raw + non-project)"""
+    all_sheets = get_sheet_names(spreadsheet)
+    raw_names = [v['name'] for v in RAW_TO_ACCOUNT.values()]
+    raw_names += list(RAW_TO_ACCOUNT.keys())
+    project = [s for s in all_sheets
+               if s not in NON_PROJECT_SHEETS
+               and s not in raw_names
+               and not s.lower().startswith('raw_')]
+    return project
+
+def get_sheet_history(spreadsheet, sheet_name, max_rows=200):
+    """Lấy lịch sử data của 1 sheet để học pattern"""
+    try:
+        ws = spreadsheet.worksheet(sheet_name)
+        data = ws.get_all_values()
+        return data[-max_rows:] if len(data) > max_rows else data
+    except:
+        return []
+
+def suggest_project_sheet(description, project_sheets, spreadsheet):
+    """
+    Đề xuất sheet dự án dựa vào nội dung giao dịch
+    Logic: tìm sheet nào có nhiều keyword giống description nhất
+    """
+    if not description:
+        return project_sheets[0] if project_sheets else None
+
+    desc_words = set(description.upper().split())
+    scores = {}
+
+    for sheet_name in project_sheets:
+        history = get_sheet_history(spreadsheet, sheet_name, max_rows=100)
+        if not history:
+            scores[sheet_name] = 0
+            continue
+
+        score = 0
+        # Lấy tất cả text từ lịch sử sheet
+        all_text = ' '.join([' '.join([str(c) for c in row]) for row in history]).upper()
+
+        # Tìm keyword overlap
+        for word in desc_words:
+            if len(word) >= 4 and word in all_text:
+                score += 1
+
+        # Bonus: tên sheet xuất hiện trong description
+        if sheet_name.upper() in description.upper():
+            score += 10
+
+        scores[sheet_name] = score
+
+    # Sort theo score cao nhất
+    sorted_sheets = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_sheets[0][0] if sorted_sheets else project_sheets[0]
+
+def get_account_cell(spreadsheet, raw_sheet_name):
+    """Tìm cell số dư trong sheet Account cho raw sheet tương ứng"""
+    try:
+        ws = spreadsheet.worksheet('Account')
+        data = ws.get_all_values()
+        for i, row in enumerate(data):
+            for j, cell in enumerate(row):
+                if str(cell).strip() == raw_sheet_name:
+                    # Tìm cell số tiếp theo cùng dòng có giá trị số
+                    for k in range(j+1, len(row)):
+                        v = str(row[k]).replace(',','').replace('.','').strip()
+                        if v.isdigit():
+                            # Trả về địa chỉ cell (row i+1, col k+1)
+                            col_letter = chr(65 + k)
+                            return f"{col_letter}{i+1}", float(row[k].replace(',',''))
+    except Exception as e:
+        pass
+    return None, None
+
+def append_to_raw_sheet(spreadsheet, raw_sheet_name, row_data):
+    """Append 1 dòng vào raw sheet"""
+    ws = spreadsheet.worksheet(raw_sheet_name)
+    ws.append_row(row_data, value_input_option='USER_ENTERED')
+
+def append_to_project_sheet(spreadsheet, project_sheet_name, date_str, desc, amount):
+    """Append 1 dòng vào sheet dự án (nghịch dấu với tài khoản)"""
+    ws = spreadsheet.worksheet(project_sheet_name)
+    ws.append_row([date_str, desc, -amount], value_input_option='USER_ENTERED')
+
+def update_account_balance(spreadsheet, cell_addr, delta):
+    """Cộng/trừ số dư tài khoản trong sheet Account"""
+    ws = spreadsheet.worksheet('Account')
+    current = ws.acell(cell_addr).value
+    current_val = float(str(current).replace(',','').replace('.','')) if current else 0
+    new_val = current_val + delta
+    ws.update_acell(cell_addr, new_val)
+
+def build_raw_row(tx, raw_sheet_name, spreadsheet):
+    """Build row data để append vào raw sheet, auto-map columns"""
+    try:
+        ws = spreadsheet.worksheet(raw_sheet_name)
+        header = ws.row_values(1)
+        if not header:
+            # Default: date, desc, debit, credit, balance, ref
+            return [tx.get('date',''), tx.get('desc',''),
+                    tx.get('debit',0), tx.get('credit',0),
+                    tx.get('balance',''), tx.get('ref','')]
+
+        row = []
+        for col in header:
+            col_l = col.lower().strip()
+            if any(k in col_l for k in ['ngày','date','ngay']):
+                row.append(tx.get('date',''))
+            elif any(k in col_l for k in ['nội dung','diễn giải','mô tả','desc','noi dung']):
+                row.append(tx.get('desc',''))
+            elif any(k in col_l for k in ['rút','nợ','debit','ghi nợ','chi']):
+                row.append(tx.get('debit',0))
+            elif any(k in col_l for k in ['gửi','có','credit','ghi có','thu']):
+                row.append(tx.get('credit',0))
+            elif any(k in col_l for k in ['số dư','balance','so du']):
+                row.append(tx.get('balance',''))
+            elif any(k in col_l for k in ['số gd','ref','so gd','but toan']):
+                row.append(tx.get('ref',''))
+            elif any(k in col_l for k in ['tên tk','tên tài khoản','counter name']):
+                row.append(tx.get('counter_name',''))
+            elif any(k in col_l for k in ['tk đối','tài khoản đối','counter acc']):
+                row.append(tx.get('counter_acct',''))
+            else:
+                row.append('')
+        return row
+    except:
+        return [tx.get('date',''), tx.get('desc',''),
+                tx.get('debit',0), tx.get('credit',0)]
+
+# ── PHASE 2 UI ───────────────────────────────────────────────
+
+
 BIG_ISSUE_OPTION = "⚡ Big Issue (D86 - Account)"
 BIG_ISSUE_CELL = "D86"
 BIG_ISSUE_SHEET = "Account"
@@ -459,7 +606,6 @@ def update_big_issue(spreadsheet, delta):
     """Cộng/trừ trực tiếp vào cell D86 trong sheet Account"""
     ws = spreadsheet.worksheet(BIG_ISSUE_SHEET)
     current = ws.acell(BIG_ISSUE_CELL).value
-    # Parse giá trị hiện tại (có thể có dấu . phân cách nghìn)
     current_val = 0
     if current:
         s = str(current).replace(',','').replace('.','').strip()
@@ -470,9 +616,8 @@ def update_big_issue(spreadsheet, delta):
     new_val = current_val + delta
     ws.update_acell(BIG_ISSUE_CELL, new_val)
 
-
 def get_last_ref_from_raw(spreadsheet, raw_sheet_name):
-    """B2: Lấy ref (Số GD/Số bút toán) cuối cùng từ Raw sheet trên GSheet"""
+    """B2: Lấy ref cuối cùng từ Raw sheet"""
     try:
         ws = spreadsheet.worksheet(raw_sheet_name)
         all_data = ws.get_all_values()
@@ -490,7 +635,6 @@ def get_last_ref_from_raw(spreadsheet, raw_sheet_name):
         if ref_col_idx < 0:
             return None
         
-        # Tìm ref cuối cùng (duyệt ngược từ dưới lên)
         for row in reversed(all_data[1:]):
             if ref_col_idx < len(row):
                 val = str(row[ref_col_idx] or '').strip()
@@ -508,10 +652,8 @@ def get_account_balance_for_raw(spreadsheet, raw_sheet_name):
         for i, row in enumerate(data):
             for j, cell in enumerate(row):
                 if str(cell).strip() == raw_sheet_name:
-                    # Tìm cell số tiếp theo cùng dòng
                     for k in range(j+1, len(row)):
                         v = str(row[k]).replace(',','').strip()
-                        # Parse số VN (dấu . phân cách nghìn)
                         v_clean = v.replace('.','')
                         if v_clean.isdigit() or (v_clean.startswith('-') and v_clean[1:].isdigit()):
                             return int(v_clean)
@@ -538,7 +680,7 @@ def render_phase2():
             return
         creds_json = json.load(creds_file)
 
-    # Kết nối (cache để tránh quota)
+    # Kết nối (cache)
     if 'gsheet_connected' not in st.session_state:
         with st.spinner("🔌 Đang kết nối Google Sheets..."):
             spreadsheet, err = connect_gsheet(creds_json)
@@ -554,7 +696,6 @@ def render_phase2():
     
     st.success(f"✅ Đã kết nối: **{spreadsheet.title}**")
 
-    # Kiểm tra có file merged không
     if 'merge_results' not in st.session_state or not st.session_state.merge_results:
         st.warning("⚠️ Chưa có file nào được merge. Vui lòng chạy Phase 1 trước!")
         return
@@ -564,7 +705,6 @@ def render_phase2():
         st.warning("Không có file hợp lệ từ Phase 1")
         return
 
-    # Chọn file để duyệt
     file_options = list(ok_results.keys())
     selected_key = st.selectbox(
         "📂 Chọn file để duyệt",
@@ -575,7 +715,6 @@ def render_phase2():
     res = ok_results[selected_key]
     res['data'].seek(0)
 
-    # Đọc transactions từ file merged
     wb = openpyxl.load_workbook(res['data'], data_only=True)
     ws_merged = wb.active
     rows = [list(r) for r in ws_merged.iter_rows(values_only=True)]
@@ -588,7 +727,7 @@ def render_phase2():
 
     headers = [str(c or '').replace('\n',' ').strip() for c in rows[h_idx]]
 
-    # Build TOÀN BỘ danh sách transactions (kèm balance)
+    # Build TOÀN BỘ transactions
     all_transactions = []
     for row in rows[h_idx+1:]:
         flat = ''.join([str(c or '') for c in row]).strip()
@@ -635,7 +774,7 @@ def render_phase2():
         return
 
     # ═══════════════════════════════════════════════
-    # B2: TÌM ĐIỂM CẮT — Ref cuối cùng trong Raw sheet
+    # B2: TÌM ĐIỂM CẮT
     # ═══════════════════════════════════════════════
     acct_no = selected_key.split('_')[1] if '_' in selected_key else ''
     raw_sheet_candidates = [k for k,v in RAW_TO_ACCOUNT.items() if acct_no in k]
@@ -647,7 +786,6 @@ def render_phase2():
     with st.spinner("🔍 B2: Đang tìm giao dịch cuối trong Raw sheet..."):
         last_ref = get_last_ref_from_raw(spreadsheet, raw_sheet_gsheet)
 
-    # Tìm điểm cắt trong file merged
     cutoff_idx = -1
     cutoff_balance = 0
     if last_ref:
@@ -661,7 +799,7 @@ def render_phase2():
         st.info(f"🔗 Ref cuối trong Raw sheet: `{last_ref}` → vị trí #{cutoff_idx + 1}/{len(all_transactions)}")
         new_transactions = all_transactions[cutoff_idx + 1:]
     elif last_ref and cutoff_idx < 0:
-        st.warning(f"⚠️ Ref cuối `{last_ref}` không tìm thấy trong file merged. Hiển thị tất cả giao dịch.")
+        st.warning(f"⚠️ Ref cuối `{last_ref}` không tìm thấy trong file merged. Hiển thị tất cả.")
         new_transactions = all_transactions
         cutoff_balance = 0
     else:
@@ -712,10 +850,8 @@ def render_phase2():
 
     st.subheader(f"🆕 {len(transactions)} giao dịch mới cần duyệt")
 
-    # Dropdown options = Big Issue + project sheets
     dropdown_options = [BIG_ISSUE_OPTION] + project_sheets
 
-    # Dropdown "Chọn tất cả"
     col_bulk1, col_bulk2 = st.columns([3, 1])
     with col_bulk1:
         bulk_sheet = st.selectbox(
@@ -732,7 +868,6 @@ def render_phase2():
 
     st.divider()
 
-    # Hiển thị bảng giao dịch
     for i, tx in enumerate(transactions):
         color = "🟢" if tx['direction'] == 'THU' else "🔴"
         amount_fmt = f"{tx['amount']:,.0f}"
@@ -771,7 +906,6 @@ def render_phase2():
 
     st.divider()
 
-    # ── NÚT SUBMIT TẤT CẢ ──
     col_s1, col_s2 = st.columns([1, 1])
     with col_s1:
         st.metric("Tổng giao dịch mới", len(transactions))
@@ -790,11 +924,9 @@ def render_phase2():
                 sheet_key = f"p2_sheet_{selected_key}_{i}"
                 selected_project = st.session_state.get(sheet_key, dropdown_options[0])
 
-                # 1. Append vào Raw sheet
                 raw_row = build_raw_row(tx, raw_sheet_gsheet, spreadsheet)
                 append_to_raw_sheet(spreadsheet, raw_sheet_gsheet, raw_row)
 
-                # 2. Hạch toán: Big Issue hoặc sheet dự án
                 delta = tx['credit'] if tx['direction'] == 'THU' else -tx['debit']
 
                 if selected_project == BIG_ISSUE_OPTION:
@@ -803,7 +935,6 @@ def render_phase2():
                     append_to_project_sheet(spreadsheet, selected_project,
                                            tx['date'], tx['desc'], -delta)
 
-                # 3. Cập nhật số dư Account
                 cell_addr, _ = get_account_cell(spreadsheet, raw_sheet_gsheet)
                 if cell_addr:
                     update_account_balance(spreadsheet, cell_addr, delta)

@@ -600,7 +600,7 @@ def render_phase2():
     st.divider()
     st.header("📋 Phase 2 — Duyệt lệnh & Hạch toán")
 
-    # Load credentials từ Streamlit Secrets (ưu tiên) hoặc upload file
+    # Load credentials
     creds_json = None
     try:
         creds_json = dict(st.secrets["gcp_service_account"])
@@ -614,24 +614,28 @@ def render_phase2():
             return
         creds_json = json.load(creds_file)
 
-    # Kết nối
-    with st.spinner("🔌 Đang kết nối Google Sheets..."):
-        spreadsheet, err = connect_gsheet(creds_json)
-
-    if err:
-        st.error(f"❌ Kết nối thất bại: {err}")
-        return
-
+    # Kết nối (cache để tránh quota)
+    if 'gsheet_connected' not in st.session_state:
+        with st.spinner("🔌 Đang kết nối Google Sheets..."):
+            spreadsheet, err = connect_gsheet(creds_json)
+        if err:
+            st.error(f"❌ Kết nối thất bại: {err}")
+            return
+        st.session_state.gsheet_connected = True
+        st.session_state.spreadsheet = spreadsheet
+        st.session_state.project_sheets = get_project_sheets(spreadsheet)
+    
+    spreadsheet = st.session_state.spreadsheet
+    project_sheets = st.session_state.project_sheets
+    
     st.success(f"✅ Đã kết nối: **{spreadsheet.title}**")
 
-    # Kiểm tra có file merged trong session không
+    # Kiểm tra có file merged không
     if 'merge_results' not in st.session_state or not st.session_state.merge_results:
         st.warning("⚠️ Chưa có file nào được merge. Vui lòng chạy Phase 1 trước!")
         return
 
-    project_sheets = get_project_sheets(spreadsheet)
     ok_results = {k:v for k,v in st.session_state.merge_results.items() if 'error' not in v}
-
     if not ok_results:
         st.warning("Không có file hợp lệ từ Phase 1")
         return
@@ -652,7 +656,6 @@ def render_phase2():
     ws_merged = wb.active
     rows = [list(r) for r in ws_merged.iter_rows(values_only=True)]
 
-    # Tìm header row
     bank_id = selected_key.split('_')[0]
     h_idx = find_header_row(rows, bank_id)
     if h_idx < 0:
@@ -667,7 +670,6 @@ def render_phase2():
         flat = ''.join([str(c or '') for c in row]).strip()
         if not flat: continue
 
-        # Tìm date
         d = None
         date_str = ''
         for ci in range(min(5, len(row))):
@@ -677,7 +679,6 @@ def render_phase2():
                 break
         if not d: continue
 
-        # Map các fields
         tx = {'date': date_str, 'desc': '', 'debit': 0, 'credit': 0,
               'balance': '', 'ref': '', 'counter_name': '', 'counter_acct': ''}
 
@@ -709,108 +710,129 @@ def render_phase2():
         st.warning("Không có giao dịch nào trong file này")
         return
 
-    # Session state cho navigation
-    if 'tx_index' not in st.session_state:
-        st.session_state.tx_index = 0
-    if 'approved_txs' not in st.session_state:
-        st.session_state.approved_txs = set()
+    # ── BẢNG GIAO DỊCH VỚI DROPDOWN ──
+    acct_no = selected_key.split('_')[1] if '_' in selected_key else ''
+    raw_sheet_candidates = [k for k,v in RAW_TO_ACCOUNT.items() if acct_no in k]
+    raw_sheet = raw_sheet_candidates[0] if raw_sheet_candidates else acct_no
 
-    pending = [i for i, _ in enumerate(transactions) if i not in st.session_state.approved_txs]
+    st.markdown(f"🏦 **{bank_id}** · `{acct_no}` → Raw sheet: `{raw_sheet}`")
+    st.markdown(f"**{len(transactions)}** giao dịch tìm thấy")
+    st.divider()
 
-    st.markdown(f"**{len(pending)}** giao dịch chờ duyệt / **{len(transactions)}** tổng")
-    if not pending:
-        st.success("🎉 Đã duyệt hết tất cả giao dịch!")
-        return
-
-    # Đảm bảo tx_index hợp lệ
-    if st.session_state.tx_index not in pending:
-        st.session_state.tx_index = pending[0]
-
-    cur_pos = pending.index(st.session_state.tx_index)
-    tx = transactions[st.session_state.tx_index]
-
-    # Progress bar
-    progress = (len(transactions) - len(pending)) / len(transactions)
-    st.progress(progress, text=f"{len(transactions)-len(pending)}/{len(transactions)} đã duyệt")
-
-    # Card giao dịch
-    col_info, col_action = st.columns([3, 2])
-
-    with col_info:
-        color = "🟢" if tx['direction'] == 'THU' else "🔴"
-        amount_fmt = f"{tx['amount']:,.0f} VND"
-        st.markdown(f"### {color} {'+' if tx['direction']=='THU' else '-'}{amount_fmt}")
-        st.markdown(f"📅 **{tx['date']}** &nbsp;|&nbsp; {tx['direction']}")
-        st.markdown(f"🏦 **{bank_id}** · `{selected_key.split('_')[1] if '_' in selected_key else ''}`")
-        st.text_area("Nội dung", tx['desc'], height=80, disabled=True, key=f"desc_{st.session_state.tx_index}")
-        if tx['counter_name']:
-            st.caption(f"👤 {tx['counter_name']} {('· ' + tx['counter_acct']) if tx['counter_acct'] else ''}")
-
-    with col_action:
-        # Raw sheet name
-        acct_no = selected_key.split('_')[1] if '_' in selected_key else ''
-        raw_sheet_candidates = [k for k,v in RAW_TO_ACCOUNT.items() if acct_no in k]
-        raw_sheet = raw_sheet_candidates[0] if raw_sheet_candidates else acct_no
-
-        st.markdown(f"**Sheet Raw:** `{raw_sheet}`")
-
-        # Đề xuất sheet dự án
-        suggested = suggest_project_sheet(tx['desc'], project_sheets, spreadsheet)
-        suggested_idx = project_sheets.index(suggested) if suggested in project_sheets else 0
-
-        selected_project = st.selectbox(
-            "📁 Sheet dự án",
-            project_sheets,
-            index=suggested_idx,
-            key=f"proj_{st.session_state.tx_index}"
+    # Dropdown "Chọn tất cả" — áp dụng 1 sheet cho toàn bộ
+    col_bulk1, col_bulk2 = st.columns([3, 1])
+    with col_bulk1:
+        bulk_sheet = st.selectbox(
+            "⚡ Áp dụng nhanh 1 sheet cho tất cả dòng",
+            ["-- Không áp dụng --"] + project_sheets,
+            key="bulk_sheet"
         )
-
-        # Navigation
-        nav_col1, nav_col2 = st.columns(2)
-        with nav_col1:
-            if st.button("◀ Trước", disabled=cur_pos==0, use_container_width=True):
-                st.session_state.tx_index = pending[cur_pos-1]
-                st.rerun()
-        with nav_col2:
-            if st.button("Sau ▶", disabled=cur_pos==len(pending)-1, use_container_width=True):
-                st.session_state.tx_index = pending[cur_pos+1]
+    with col_bulk2:
+        if st.button("Áp dụng", use_container_width=True, key="apply_bulk"):
+            if bulk_sheet != "-- Không áp dụng --":
+                for i in range(len(transactions)):
+                    st.session_state[f"p2_sheet_{selected_key}_{i}"] = bulk_sheet
                 st.rerun()
 
-        if st.button("✅ Duyệt & Hạch toán", type="primary", use_container_width=True,
-                     key=f"approve_{st.session_state.tx_index}"):
+    st.divider()
+
+    # Hiển thị bảng giao dịch
+    for i, tx in enumerate(transactions):
+        color = "🟢" if tx['direction'] == 'THU' else "🔴"
+        amount_fmt = f"{tx['amount']:,.0f}"
+        sign = "+" if tx['direction'] == 'THU' else "-"
+
+        # Mỗi giao dịch = 1 row với 4 cột
+        c1, c2, c3, c4 = st.columns([1.2, 3.5, 2, 2.5])
+
+        with c1:
+            st.markdown(f"**{tx['date']}**")
+            st.caption(f"{color} {tx['direction']}")
+
+        with c2:
+            desc_short = tx['desc'][:80] + ('...' if len(tx['desc']) > 80 else '')
+            st.markdown(f"{desc_short}")
+            if tx['counter_name']:
+                st.caption(f"👤 {tx['counter_name']}")
+
+        with c3:
+            st.markdown(f"**{sign}{amount_fmt}**")
+
+        with c4:
+            # Default: sheet đầu tiên hoặc giá trị đã chọn
+            default_key = f"p2_sheet_{selected_key}_{i}"
+            default_idx = 0
+            if default_key in st.session_state and st.session_state[default_key] in project_sheets:
+                default_idx = project_sheets.index(st.session_state[default_key])
+
+            st.selectbox(
+                "Sheet",
+                project_sheets,
+                index=default_idx,
+                key=default_key,
+                label_visibility="collapsed"
+            )
+
+        # Đường kẻ mỏng giữa các dòng
+        st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── NÚT SUBMIT TẤT CẢ ──
+    col_s1, col_s2 = st.columns([1, 1])
+    with col_s1:
+        st.metric("Tổng giao dịch", len(transactions))
+    with col_s2:
+        total_thu = sum(tx['credit'] for tx in transactions if tx['direction'] == 'THU')
+        total_chi = sum(tx['debit'] for tx in transactions if tx['direction'] == 'CHI')
+        st.metric("THU / CHI", f"+{total_thu:,.0f} / -{total_chi:,.0f}")
+
+    if st.button("✅ Duyệt & Hạch toán TẤT CẢ", type="primary", use_container_width=True):
+        progress_bar = st.progress(0, text="Đang hạch toán...")
+        success_count = 0
+        error_list = []
+
+        for i, tx in enumerate(transactions):
             try:
-                with st.spinner("⏳ Đang hạch toán..."):
-                    # 1. Append vào Raw sheet
-                    raw_row = build_raw_row(tx, raw_sheet, spreadsheet)
-                    append_to_raw_sheet(spreadsheet, raw_sheet, raw_row)
+                sheet_key = f"p2_sheet_{selected_key}_{i}"
+                selected_project = st.session_state.get(sheet_key, project_sheets[0])
 
-                    # 2. Append vào sheet dự án (nghịch dấu)
-                    proj_amount = tx['credit'] if tx['direction']=='THU' else -tx['debit']
-                    append_to_project_sheet(spreadsheet, selected_project,
-                                          tx['date'], tx['desc'], proj_amount)
+                # 1. Append vào Raw sheet
+                raw_row = build_raw_row(tx, raw_sheet, spreadsheet)
+                append_to_raw_sheet(spreadsheet, raw_sheet, raw_row)
 
-                    # 3. Cập nhật số dư Account
-                    cell_addr, _ = get_account_cell(spreadsheet, raw_sheet)
-                    if cell_addr:
-                        delta = tx['credit'] if tx['direction']=='THU' else -tx['debit']
-                        update_account_balance(spreadsheet, cell_addr, delta)
+                # 2. Append vào sheet dự án
+                proj_amount = tx['credit'] if tx['direction'] == 'THU' else -tx['debit']
+                append_to_project_sheet(spreadsheet, selected_project,
+                                       tx['date'], tx['desc'], proj_amount)
 
-                st.session_state.approved_txs.add(st.session_state.tx_index)
-                # Chuyển sang giao dịch tiếp theo
-                remaining = [i for i in pending if i != st.session_state.tx_index]
-                if remaining:
-                    st.session_state.tx_index = remaining[0]
-                st.success(f"✅ Đã hạch toán vào **{raw_sheet}** và **{selected_project}**")
-                st.rerun()
+                # 3. Cập nhật số dư Account
+                cell_addr, _ = get_account_cell(spreadsheet, raw_sheet)
+                if cell_addr:
+                    delta = tx['credit'] if tx['direction'] == 'THU' else -tx['debit']
+                    update_account_balance(spreadsheet, cell_addr, delta)
+
+                success_count += 1
+
             except Exception as e:
-                st.error(f"❌ Lỗi: {str(e)}")
+                error_list.append(f"Dòng {i+1}: {str(e)}")
 
-        if st.button("⏭ Bỏ qua", use_container_width=True,
-                     key=f"skip_{st.session_state.tx_index}"):
-            remaining = [i for i in pending if i != st.session_state.tx_index]
-            if remaining:
-                st.session_state.tx_index = remaining[0]
-            st.rerun()
+            # Cập nhật progress
+            progress_bar.progress((i + 1) / len(transactions),
+                                  text=f"Đang hạch toán... {i+1}/{len(transactions)}")
+
+            # Delay nhẹ tránh quota limit
+            import time
+            time.sleep(0.3)
+
+        progress_bar.progress(1.0, text="Hoàn tất!")
+
+        if success_count > 0:
+            st.success(f"✅ Đã hạch toán thành công **{success_count}/{len(transactions)}** giao dịch vào **{raw_sheet}**")
+        if error_list:
+            with st.expander(f"⚠️ {len(error_list)} lỗi", expanded=True):
+                for e in error_list:
+                    st.error(e)
 
 # Thêm tab Phase 2 vào app
 st.divider()

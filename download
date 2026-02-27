@@ -1,0 +1,12 @@
+# Credentials - KHÔNG push lên GitHub
+*.json
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+venv/

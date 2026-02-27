@@ -371,6 +371,9 @@ if uploaded:
         with st.spinner("⏳ Đang xử lý..."):
             results = process_files(groups)
 
+        # Lưu vào session_state để Phase 2 dùng được
+        st.session_state.merge_results = results
+
         st.success(f"✅ Hoàn tất! {len(results)} file đã được tạo")
         st.divider()
 
